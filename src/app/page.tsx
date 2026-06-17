@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, Compass, Shield, Sparkles, Target } from 'lucide-react'
 import { AppHeader } from '@/components/AppHeader'
 import { ChipMultiSelect } from '@/components/ChipMultiSelect'
@@ -79,6 +79,8 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null)
   const [submitAttempted, setSubmitAttempted] = useState(false)
   const [touchedFields, setTouchedFields] = useState<Partial<Record<ValidatedField, boolean>>>({})
+  const formActionRef = useRef<HTMLDivElement | null>(null)
+  const resultSectionRef = useRef<HTMLDivElement | null>(null)
 
   const normalizedPreview = useMemo(() => {
     const current = parseTimeInput(form.currentTimeInput)
@@ -106,6 +108,11 @@ export default function Home() {
   }, [normalizedPreview])
 
   const validation = useMemo(() => validatePlanForm(form), [form])
+
+  useEffect(() => {
+    if (!result) return
+    resultSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [result])
 
   function markTouched(field: ValidatedField) {
     setTouchedFields((prev) => (prev[field] ? prev : { ...prev, [field]: true }))
@@ -137,6 +144,10 @@ export default function Home() {
     setLastCopied(false)
   }
 
+  function onBackToForm() {
+    formActionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+
   return (
     <div className="min-h-screen bg-abyss-gradient">
       <div className="pointer-events-none absolute inset-0 opacity-70">
@@ -150,9 +161,6 @@ export default function Home() {
           current={headerStats.current}
           goal={headerStats.goal}
           ratio={headerStats.ratio}
-          error={error}
-          isGenerating={isGenerating}
-          onGenerate={onGenerate}
         />
 
         <main className="mt-8 grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
@@ -355,14 +363,57 @@ export default function Home() {
                 </FieldRow>
               </div>
             </SectionCard>
+
+            <div
+              ref={formActionRef}
+              className="rounded-3xl border border-white/10 bg-[linear-gradient(135deg,rgba(2,132,199,0.18),rgba(6,182,212,0.08),rgba(15,23,42,0.72))] p-5 backdrop-blur-xl shadow-[0_18px_80px_rgba(0,229,255,0.12)]"
+            >
+              <div className="flex flex-col gap-4">
+                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="font-display text-base text-white/94">准备生成训练计划</div>
+                    <div className="mt-1 text-xs leading-6 text-white/58">
+                      所有信息填写完成后，直接在这里提交，无需回到页面顶部。
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/62">
+                    生成后将自动滚动到结果区域
+                  </div>
+                </div>
+
+                {error ? (
+                  <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100/90">
+                    {error}
+                  </div>
+                ) : null}
+
+                <button
+                  type="button"
+                  onClick={onGenerate}
+                  disabled={isGenerating}
+                  className={[
+                    'inline-flex w-full items-center justify-center gap-2 rounded-2xl px-5 py-4 text-sm font-semibold text-abyss-950 transition',
+                    'bg-[linear-gradient(90deg,rgba(0,229,255,0.92),rgba(59,130,246,0.86),rgba(0,245,212,0.84))] shadow-[0_18px_60px_rgba(0,229,255,0.18)]',
+                    'hover:shadow-[0_18px_90px_rgba(0,229,255,0.24)] active:translate-y-[1px]',
+                    isGenerating ? 'opacity-70' : '',
+                  ].join(' ')}
+                >
+                  <Sparkles className="h-5 w-5" />
+                  {isGenerating ? '生成中…' : '生成训练计划'}
+                </button>
+              </div>
+            </div>
           </div>
 
-          <div className="space-y-6">
+          <div ref={resultSectionRef} className="space-y-6">
             <SectionCard title="结果展示区" subtitle="点击“生成训练计划”后显示 Mock 结果（下一阶段接入规则引擎）" icon={<Sparkles className="h-5 w-5 text-neon-cyan/90" />}>
               <ResultsPanel
                 form={form}
                 result={result}
                 lastCopied={lastCopied}
+                isGenerating={isGenerating}
+                onBackToForm={onBackToForm}
+                onRegenerate={onGenerate}
                 onReset={onReset}
                 onCopied={() => {
                   setLastCopied(true)

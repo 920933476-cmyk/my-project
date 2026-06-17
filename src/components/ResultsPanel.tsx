@@ -1,11 +1,21 @@
 import type { ReactNode } from 'react'
 import { Activity, ClipboardCopy, Dumbbell, MessageCircle, RefreshCcw, Shield, Sparkles, Target, ThumbsDown, ThumbsUp, Waves } from 'lucide-react'
-import type { PlanFormState, TrainingPlanResult } from '@/lib/types'
+import type { PlanFormState, TrainingPlanResult, TrainingSet } from '@/lib/types'
 import { toPlainText } from '@/lib/mockPlan'
 import { getFeedbackUrl } from '@/lib/feedback'
 
 function fmtMeters(m: number) {
   return `${m.toLocaleString('zh-CN')}m`
+}
+
+function renderSetLabel(set: TrainingPlanResult['weeklyTrainingPlan'][number]['blocks'][number]['sets'][number]) {
+  const s = set as TrainingSet
+  return {
+    title: `${s.repetitions}×${s.distanceMeters}m ${s.stroke}`,
+    meta: [`Drill：${s.drillName}`, `Zone ${s.zone}`, `心率 ${s.heartRateRange}`, `出发间隔 ${s.sendOffIntervalSeconds}秒`].join('｜'),
+    subMeta: [`配速 ${s.paceTarget}`, `间歇 ${s.restSeconds}秒`, `预计训练时长 ${Math.round(s.estimatedDurationSeconds / 60)} 分钟`, `RPE ${s.rpe}`].join('｜'),
+    note: s.note ?? s.techniqueCues[0] ?? null,
+  }
 }
 
 function ResultBlock({
@@ -36,12 +46,18 @@ export function ResultsPanel({
   form,
   result,
   lastCopied,
+  isGenerating,
+  onBackToForm,
+  onRegenerate,
   onReset,
   onCopied,
 }: {
   form: PlanFormState
   result: TrainingPlanResult | null
   lastCopied: boolean
+  isGenerating: boolean
+  onBackToForm: () => void
+  onRegenerate: () => void
   onReset: () => void
   onCopied: () => void
 }) {
@@ -72,11 +88,28 @@ export function ResultsPanel({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+        <button
+          type="button"
+          onClick={onBackToForm}
+          className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white/80 transition hover:bg-white/7 hover:text-white"
+        >
+          <Target className="h-4 w-4 text-neon-blue/80" />
+          返回修改
+        </button>
+        <button
+          type="button"
+          onClick={onRegenerate}
+          disabled={isGenerating}
+          className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white/80 transition hover:bg-white/7 hover:text-white disabled:opacity-70"
+        >
+          <RefreshCcw className="h-4 w-4 text-neon-cyan/80" />
+          {isGenerating ? '生成中…' : '重新生成'}
+        </button>
         <button
           type="button"
           onClick={onCopy}
-          className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white/80 transition hover:bg-white/7 hover:text-white"
+          className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white/80 transition hover:bg-white/7 hover:text-white"
         >
           <ClipboardCopy className="h-4 w-4 text-neon-cyan/80" />
           {lastCopied ? '已复制' : '复制训练计划'}
@@ -87,7 +120,7 @@ export function ResultsPanel({
           className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white/70 transition hover:bg-white/7 hover:text-white"
         >
           <RefreshCcw className="h-4 w-4 text-white/70" />
-          重新生成
+          清空结果
         </button>
       </div>
 
@@ -127,6 +160,12 @@ export function ResultsPanel({
                 </div>
                 <div className="mt-1 text-xs text-white/60">{z.purpose}</div>
                 <div className="mt-2 text-xs text-white/70">{z.intensityHint}</div>
+                <div className="mt-2 grid gap-2 text-[11px] text-white/58 md:grid-cols-2">
+                  <div>建议心率：{z.hrHint}</div>
+                  <div>建议休息：{z.restSuggestion}</div>
+                  <div>配速建议：{z.paceSuggestion}</div>
+                  <div>预计训练时间：{z.estimatedDurationHint}</div>
+                </div>
               </div>
             ))}
           </div>
@@ -141,8 +180,13 @@ export function ResultsPanel({
                     <div className="font-display text-sm text-white/95">{s.title}</div>
                     <div className="mt-0.5 text-xs text-white/55">{s.focus}</div>
                   </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/75">
-                    总量 {fmtMeters(s.totalMeters)}
+                  <div className="flex flex-wrap gap-2">
+                    <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/75">
+                      总量 {fmtMeters(s.totalMeters)}
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/75">
+                      预计训练时长 {s.estimatedDurationMinutes} 分钟
+                    </div>
                   </div>
                 </div>
                 <div className="mt-3 space-y-3">
@@ -153,12 +197,22 @@ export function ResultsPanel({
                         {b.zone ? <span className="ml-2 text-white/40">Zone {b.zone}</span> : null}
                       </div>
                       <ul className="mt-2 space-y-1.5 text-xs text-white/65">
-                        {b.sets.map((x) => (
-                          <li key={x} className="flex items-start gap-2">
-                            <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-white/35" />
-                            <span>{x}</span>
-                          </li>
-                        ))}
+                        {b.sets.map((x, index) => {
+                          const rendered = renderSetLabel(x)
+                          return (
+                            <li key={`${b.label}-${index}`} className="flex items-start gap-2">
+                              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-white/35" />
+                              <div className="min-w-0">
+                                <div className="text-sm text-white/82">{rendered.title}</div>
+                                <div className="mt-1 text-[11px] leading-5 text-white/58">{rendered.meta}</div>
+                                <div className="mt-1 text-[11px] leading-5 text-white/50">{rendered.subMeta}</div>
+                                {rendered.note ? (
+                                  <div className="mt-1 text-[11px] leading-5 text-neon-cyan/72">{rendered.note}</div>
+                                ) : null}
+                              </div>
+                            </li>
+                          )
+                        })}
                       </ul>
                     </div>
                   ))}

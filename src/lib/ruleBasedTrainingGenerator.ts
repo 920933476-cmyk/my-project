@@ -8,11 +8,14 @@ import type {
   IntensityTier,
   PlanFormState,
   PoolLength,
+  RPE,
   TrainingPlanResult,
+  TrainingSet,
   TrainingZoneId,
   WeeklySession,
 } from './types'
-import { ZONE_FRAMEWORK } from './zoneFramework'
+import { ZONE_FRAMEWORK, estimateIntervalSeconds, estimateRestSeconds } from './zoneFramework'
+import { getRecommendedDrills } from './drills/query'
 
 type GeneratorOptions = {
   now: Date
@@ -111,6 +114,532 @@ function roundToPool(value: number, poolLength: PoolLength) {
   return Math.max(step, Math.round(value / step) * step)
 }
 
+/** 根据距离和泳姿推断主泳姿 */
+function inferStroke(event: PlanFormState['event']): string {
+  if (event.includes('Free') || event.includes('自由')) return '自由泳'
+  if (event.includes('Back')) return '仰泳'
+  if (event.includes('Breast')) return '蛙泳'
+  if (event.includes('Fly')) return '蝶泳'
+  if (event.includes('IM')) return '混合泳'
+  return '自由泳'
+}
+
+function getEventDistance(event: PlanFormState['event']) {
+  const match = event.match(/\d+/)
+  return match ? Number(match[0]) : 100
+}
+
+function formatDuration(seconds: number) {
+  const total = Math.max(1, Math.round(seconds))
+  const minutes = Math.floor(total / 60)
+  const secs = total % 60
+  if (minutes === 0) return `${secs}秒`
+  return `${minutes}:${secs.toString().padStart(2, '0')}`
+}
+
+function getBasePacePer50(form: PlanFormState) {
+  const current = parseTimeInput(form.currentTimeInput)
+  const eventDistance = getEventDistance(form.event)
+  if (current && eventDistance >= 50) {
+    return current.secondsTotal / (eventDistance / 50)
+  }
+
+  const fallbackByLevel: Record<PlanFormState['level'], number> = {
+    L1: 80,
+    L2: 68,
+    L3: 58,
+    L4: 52,
+  }
+  return fallbackByLevel[form.level]
+}
+
+function getPaceTarget(form: PlanFormState, zone: TrainingZoneId, distanceMeters: number) {
+  const basePer50 = getBasePacePer50(form)
+  const factorMap: Record<TrainingZoneId, [number, number]> = {
+    1: [1.18, 1.28],
+    2: [1.08, 1.16],
+    3: [0.98, 1.05],
+    4: [0.9, 0.97],
+    5: [0.84, 0.91],
+    6: [0.78, 0.86],
+  }
+  const [fastFactor, slowFactor] = factorMap[zone]
+  const unit = distanceMeters >= 100 ? 100 : 50
+  const unitSecondsFast = basePer50 * (unit / 50) * fastFactor
+  const unitSecondsSlow = basePer50 * (unit / 50) * slowFactor
+  return `${formatDuration(unitSecondsFast)}–${formatDuration(unitSecondsSlow)}/${unit}m`
+}
+
+function getHeartRateRange(form: PlanFormState, zone: TrainingZoneId) {
+  const maxHr = typeof form.age === 'number' ? Math.round(208 - 0.7 * form.age) : 190
+  const rangeMap: Record<TrainingZoneId, [number, number]> = {
+    1: [0.55, 0.65],
+    2: [0.65, 0.75],
+    3: [0.75, 0.82],
+    4: [0.82, 0.89],
+    5: [0.89, 0.94],
+    6: [0.94, 1],
+  }
+  const [minRatio, maxRatio] = rangeMap[zone]
+  return `${Math.round(maxHr * minRatio)}–${Math.round(maxHr * maxRatio)} bpm`
+}
+
+/** 获取 Zone 对应的RPE中值 */
+function zoneRPE(zone: TrainingZoneId): RPE {
+  const map: Record<TrainingZoneId, RPE> = { 1: 2, 2: 4, 3: 6, 4: 7, 5: 8, 6: 9 }
+  return map[zone]
+}
+
+function getSetTotalMeters(set: string | TrainingSet) {
+  if (typeof set === "string") return 0
+  return set.repetitions * set.distanceMeters
+}
+
+function getBlockTotalMeters(sets: (string | TrainingSet)[]) {
+  return sets.reduce((sum, set) => sum + getSetTotalMeters(set), 0)
+}
+
+function drillNameAt(drills: ReturnType<typeof getRecommendedDrills>, index: number, fallback: string) {
+  return drills[index]?.nameZh ?? fallback
+}
+
+function makeRepetitions(targetMeters: number, distanceMeters: number, minimum: number) {
+  return Math.max(minimum, Math.round(targetMeters / distanceMeters))
+}
+
+/** 构建单个可执行训练组 */
+function makeSet(params: {
+  distanceMeters: number
+  repetitions: number
+  stroke: string
+  drillName: string
+  zone: TrainingZoneId
+  form: PlanFormState
+  drills: ReturnType<typeof getRecommendedDrills>
+  techniqueCues: string[]
+  note?: string
+}): TrainingSet {
+  const { distanceMeters, repetitions, stroke, drillName, zone, form, drills, techniqueCues, note } = params
+  const rpe = zoneRPE(zone)
+  const swimSeconds = estimateIntervalSeconds(zone, distanceMeters)
+  const restSeconds = estimateRestSeconds(zone)
+  const sendOffIntervalSeconds = swimSeconds + restSeconds
+  const estimatedDurationSeconds = repetitions * (swimSeconds + restSeconds)
+
+  return {
+    distanceMeters,
+    repetitions,
+    stroke,
+    drillName,
+    zone,
+    paceTarget: getPaceTarget(form, zone, distanceMeters),
+    heartRateRange: getHeartRateRange(form, zone),
+    restSeconds,
+    sendOffIntervalSeconds,
+    estimatedDurationSeconds,
+    rpe,
+    drillIds: drills.slice(0, 2).map((d) => d.id),
+    techniqueCues,
+    note,
+  }
+}
+
+function buildWarmupSets(
+  form: PlanFormState,
+  poolLength: PoolLength,
+  targetMeters: number,
+  drills: ReturnType<typeof getRecommendedDrills>,
+): TrainingSet[] {
+  const step = getPoolStep(poolLength)
+  const mainStroke = inferStroke(form.event)
+  const primaryDrill = drillNameAt(drills, 0, '动作唤醒')
+  const targetUnits = Math.max(6, Math.round(targetMeters / step))
+
+  return [
+    makeSet({
+      distanceMeters: step,
+      repetitions: Math.max(2, Math.round(targetUnits * 0.35)),
+      stroke: mainStroke,
+      drillName: '轻松游启动',
+      zone: 1,
+      form,
+      drills,
+      techniqueCues: ['拉长划水', '轻松换气', '逐步提高体温'],
+    }),
+    makeSet({
+      distanceMeters: step,
+      repetitions: Math.max(2, Math.round(targetUnits * 0.3)),
+      stroke: '自由腿/仰腿',
+      drillName: '交替打腿',
+      zone: 2,
+      form,
+      drills,
+      techniqueCues: ['核心保持稳定', '脚踝放松', '自由腿/仰腿交替'],
+      note: '自由腿/仰腿交替',
+    }),
+    makeSet({
+      distanceMeters: step,
+      repetitions: Math.max(2, targetUnits - Math.max(2, Math.round(targetUnits * 0.35)) - Math.max(2, Math.round(targetUnits * 0.3))),
+      stroke: mainStroke,
+      drillName: primaryDrill,
+      zone: 2,
+      form,
+      drills,
+      techniqueCues: ['用 Drill 建立水感', '保持动作放松', '为主集做神经准备'],
+    }),
+  ]
+}
+
+function buildTechniqueSets(
+  form: PlanFormState,
+  poolLength: PoolLength,
+  targetMeters: number,
+  drills: ReturnType<typeof getRecommendedDrills>,
+): TrainingSet[] {
+  const step = getPoolStep(poolLength)
+  const mainStroke = inferStroke(form.event)
+  const primaryDrill = drillNameAt(drills, 0, '单臂划水')
+  const secondaryDrill = drillNameAt(drills, 1, '配合划水')
+  const targetUnits = Math.max(4, Math.round(targetMeters / step))
+  const firstReps = Math.max(2, Math.round(targetUnits * 0.6))
+  const secondReps = Math.max(2, targetUnits - firstReps)
+
+  return [
+    makeSet({
+      distanceMeters: step,
+      repetitions: firstReps,
+      stroke: mainStroke,
+      drillName: primaryDrill,
+      zone: 1,
+      form,
+      drills,
+      techniqueCues: drills[0]?.keyPoints.slice(0, 3) ?? ['控制头位', '保持体线', '专注抓水路径'],
+    }),
+    makeSet({
+      distanceMeters: step,
+      repetitions: secondReps,
+      stroke: mainStroke,
+      drillName: secondaryDrill,
+      zone: 1,
+      form,
+      drills,
+      techniqueCues: drills[1]?.keyPoints.slice(0, 3) ?? ['动作完整', '低阻力前移', '建立节奏感'],
+    }),
+  ]
+}
+
+function buildMainSets(
+  sessionType: SessionType,
+  zone: TrainingZoneId,
+  poolLength: PoolLength,
+  targetMeters: number,
+  form: PlanFormState,
+  eventGroup: EventGroup,
+): TrainingSet[] {
+  const step = getPoolStep(poolLength)
+  const mainStroke = inferStroke(form.event)
+  const longerDistance = poolLength === '50m' ? 100 : step * 2
+  const sprintDistance = step
+  const thresholdDistance = longerDistance
+  const drills = getRecommendedDrills({
+    level: form.level,
+    eventGroup,
+    goalType: form.goalType,
+    injury: form.injury,
+    limit: 4,
+  })
+  const hasFins = form.availableEquipment.includes('脚蹼')
+  const hasTempo = form.availableEquipment.includes('Tempo Trainer')
+  const hasSnorkel = form.availableEquipment.includes('呼吸管')
+
+  switch (sessionType) {
+    case 'Recovery':
+      return [
+        makeSet({
+          distanceMeters: step,
+          repetitions: makeRepetitions(targetMeters * 0.55, step, 6),
+          stroke: `${mainStroke}/仰泳`,
+          drillName: '恢复滑行',
+          zone: 1,
+          form,
+          drills,
+          techniqueCues: ['长划放松', '保持节奏均匀', '心率快速回落'],
+        }),
+        makeSet({
+          distanceMeters: step,
+          repetitions: makeRepetitions(targetMeters * 0.25, step, 4),
+          stroke: '自由腿/仰腿',
+          drillName: '轻松打腿',
+          zone: 1,
+          form,
+          drills,
+          techniqueCues: ['小幅高频', '放松踝关节', '不过度用力'],
+          note: '自由腿/仰腿交替',
+        }),
+      ]
+    case 'Technique':
+      return [
+        makeSet({
+          distanceMeters: step,
+          repetitions: makeRepetitions(targetMeters * 0.5, step, 6),
+          stroke: mainStroke,
+          drillName: drillNameAt(drills, 0, '技术巩固'),
+          zone: 1,
+          form,
+          drills,
+          techniqueCues: drills[0]?.keyPoints.slice(0, 3) ?? ['专注动作路径', '降低无效阻力', '动作慢而准'],
+        }),
+        makeSet({
+          distanceMeters: step,
+          repetitions: makeRepetitions(targetMeters * 0.35, step, 4),
+          stroke: mainStroke,
+          drillName: hasSnorkel ? '呼吸管体线控制' : drillNameAt(drills, 1, '身体姿态控制'),
+          zone: 2,
+          form,
+          drills,
+          techniqueCues: ['保持头位稳定', '前伸长度一致', '转身后立即进入动作节奏'],
+        }),
+      ]
+    case 'Aerobic':
+      return [
+        makeSet({
+          distanceMeters: longerDistance,
+          repetitions: makeRepetitions(targetMeters * 0.58, longerDistance, 4),
+          stroke: mainStroke,
+          drillName: '稳定有氧持续',
+          zone: 2,
+          form,
+          drills,
+          techniqueCues: ['前后程配速一致', '每次划水保持长度', '全程主动吐气'],
+        }),
+        makeSet({
+          distanceMeters: step,
+          repetitions: makeRepetitions(targetMeters * 0.22, step, 4),
+          stroke: '自由腿/仰腿',
+          drillName: '有氧打腿',
+          zone: 2,
+          form,
+          drills,
+          techniqueCues: ['腿部持续输出', '保持流线', '不抬头换气'],
+          note: '自由腿/仰腿交替',
+        }),
+        makeSet({
+          distanceMeters: longerDistance,
+          repetitions: makeRepetitions(targetMeters * 0.2, longerDistance, 2),
+          stroke: mainStroke,
+          drillName: drillNameAt(drills, 0, '动作效率保持'),
+          zone: 2,
+          form,
+          drills,
+          techniqueCues: ['疲劳下保持动作完整', '转身后保持推进', '每趟结束复盘节奏'],
+        }),
+      ]
+    case 'Threshold':
+      return [
+        makeSet({
+          distanceMeters: thresholdDistance,
+          repetitions: makeRepetitions(targetMeters * 0.56, thresholdDistance, 5),
+          stroke: mainStroke,
+          drillName: '阈值持续',
+          zone: 3,
+          form,
+          drills,
+          techniqueCues: ['保持可持续高质量输出', '呼吸节奏不乱', '中后程不掉肘'],
+        }),
+        makeSet({
+          distanceMeters: step,
+          repetitions: makeRepetitions(targetMeters * 0.2, step, 4),
+          stroke: mainStroke,
+          drillName: drillNameAt(drills, 0, '负分段控制'),
+          zone: 3,
+          form,
+          drills,
+          techniqueCues: ['后25快于前25', '节奏渐进提速', '最后一趟保持技术完整'],
+        }),
+        makeSet({
+          distanceMeters: step,
+          repetitions: makeRepetitions(targetMeters * 0.18, step, 4),
+          stroke: '自由腿/仰腿',
+          drillName: '阈值打腿',
+          zone: 2,
+          form,
+          drills,
+          techniqueCues: ['腿部维持阈值节奏', '动作不散', '换气时保持体线'],
+        }),
+      ]
+    case 'VO2':
+      return [
+        makeSet({
+          distanceMeters: step,
+          repetitions: makeRepetitions(targetMeters * 0.44, step, 6),
+          stroke: mainStroke,
+          drillName: 'VO2 高质量输出',
+          zone: 4,
+          form,
+          drills,
+          techniqueCues: ['每趟接近上限输出', '组间主动恢复', '保持高肘抓水'],
+        }),
+        makeSet({
+          distanceMeters: step,
+          repetitions: makeRepetitions(targetMeters * 0.28, step, 4),
+          stroke: mainStroke,
+          drillName: hasTempo ? 'Tempo 配速锁定' : '高速节奏控制',
+          zone: 4,
+          form,
+          drills,
+          techniqueCues: ['控制出发节奏', '快而不乱', '加速段保持水感'],
+        }),
+        makeSet({
+          distanceMeters: sprintDistance,
+          repetitions: makeRepetitions(targetMeters * 0.18, sprintDistance, 4),
+          stroke: mainStroke,
+          drillName: hasFins ? '脚蹼高速水感' : drillNameAt(drills, 1, '短冲提速'),
+          zone: 5,
+          form,
+          drills,
+          techniqueCues: ['前15米快速建立速度', '组间恢复充分', '速度下动作不散'],
+        }),
+      ]
+    case 'RacePace':
+      return [
+        makeSet({
+          distanceMeters: sprintDistance,
+          repetitions: makeRepetitions(targetMeters * 0.42, sprintDistance, 8),
+          stroke: mainStroke,
+          drillName: hasTempo ? 'Tempo 比赛配速' : '比赛配速保持',
+          zone: 5,
+          form,
+          drills,
+          techniqueCues: ['严格对齐目标配速', '转身后立即提频', '后段保持推进'],
+        }),
+        makeSet({
+          distanceMeters: thresholdDistance,
+          repetitions: makeRepetitions(targetMeters * 0.3, thresholdDistance, 3),
+          stroke: mainStroke,
+          drillName: '比赛节奏整合',
+          zone: 5,
+          form,
+          drills,
+          techniqueCues: ['每组前半控制节奏', '后半模拟比赛冲刺', '呼吸策略固定'],
+        }),
+        makeSet({
+          distanceMeters: sprintDistance,
+          repetitions: makeRepetitions(targetMeters * 0.16, sprintDistance, 4),
+          stroke: mainStroke,
+          drillName: drillNameAt(drills, 0, '专项动作复现'),
+          zone: 4,
+          form,
+          drills,
+          techniqueCues: ['在高强度下保持动作模板', '不过度抬头', '保持体线稳定'],
+        }),
+      ]
+    case 'Sprint':
+      return [
+        makeSet({
+          distanceMeters: sprintDistance,
+          repetitions: makeRepetitions(targetMeters * 0.4, sprintDistance, 10),
+          stroke: mainStroke,
+          drillName: '全力短冲',
+          zone: 6,
+          form,
+          drills,
+          techniqueCues: ['全力或接近全力', '前15米速度优先', '组间完全恢复'],
+        }),
+        makeSet({
+          distanceMeters: sprintDistance,
+          repetitions: makeRepetitions(targetMeters * 0.26, sprintDistance, 6),
+          stroke: mainStroke,
+          drillName: hasFins ? '脚蹼加速' : '爆发提速',
+          zone: 6,
+          form,
+          drills,
+          techniqueCues: ['爆发启动', '快频配合强打腿', '高速下保持入水点稳定'],
+        }),
+        makeSet({
+          distanceMeters: sprintDistance,
+          repetitions: makeRepetitions(targetMeters * 0.16, sprintDistance, 4),
+          stroke: mainStroke,
+          drillName: drillNameAt(drills, 0, '速度动作修正'),
+          zone: 5,
+          form,
+          drills,
+          techniqueCues: ['速度中修正动作', '避免靠蛮力推进', '高速度保持抓水完整'],
+        }),
+      ]
+    case 'Mixed':
+    default:
+      return [
+        makeSet({
+          distanceMeters: longerDistance,
+          repetitions: makeRepetitions(targetMeters * 0.4, longerDistance, 4),
+          stroke: mainStroke,
+          drillName: '综合有氧',
+          zone: 2,
+          form,
+          drills,
+          techniqueCues: ['前半稳定', '后半渐进提速', '保持高效换气'],
+        }),
+        makeSet({
+          distanceMeters: step,
+          repetitions: makeRepetitions(targetMeters * 0.28, step, 6),
+          stroke: mainStroke,
+          drillName: '阈值整合',
+          zone: 3,
+          form,
+          drills,
+          techniqueCues: ['建立阈值节奏', '控制划频', '保持动作完整'],
+        }),
+        makeSet({
+          distanceMeters: sprintDistance,
+          repetitions: makeRepetitions(targetMeters * 0.16, sprintDistance, 4),
+          stroke: mainStroke,
+          drillName: '专项提速',
+          zone: 5,
+          form,
+          drills,
+          techniqueCues: ['短距离快节奏', '转身后立刻提速', '重视动作效率'],
+        }),
+      ]
+  }
+}
+
+function buildCoolDownSets(
+  form: PlanFormState,
+  poolLength: PoolLength,
+  targetMeters: number,
+  drills: ReturnType<typeof getRecommendedDrills>,
+): TrainingSet[] {
+  const step = getPoolStep(poolLength)
+  const mainStroke = inferStroke(form.event)
+  const targetUnits = Math.max(4, Math.round(targetMeters / step))
+  const firstReps = Math.max(2, Math.round(targetUnits * 0.65))
+  const secondReps = Math.max(2, targetUnits - firstReps)
+
+  return [
+    makeSet({
+      distanceMeters: step,
+      repetitions: firstReps,
+      stroke: `${mainStroke}/仰泳`,
+      drillName: '放松游',
+      zone: 1,
+      form,
+      drills,
+      techniqueCues: ['长滑放松', '降低心率', '专注恢复呼吸'],
+    }),
+    makeSet({
+      distanceMeters: step,
+      repetitions: secondReps,
+      stroke: '自由泳/仰泳',
+      drillName: '恢复呼吸',
+      zone: 1,
+      form,
+      drills,
+      techniqueCues: ['每趟结束主动放松肩颈', '恢复到可轻松对话状态'],
+      note: form.injury !== '无' ? `注意保护${form.injury}` : undefined,
+    }),
+  ]
+}
+
 function getSessionBlueprint(sessionType: SessionType, group: EventGroup, goalType: GoalType) {
   const common: Record<SessionType, { focus: string; zone: TrainingZoneId; label: string }> = {
     Technique: { focus: '动作质量与水感', zone: 1, label: '技术主课' },
@@ -139,60 +668,6 @@ function getSessionBlueprint(sessionType: SessionType, group: EventGroup, goalTy
   }
 }
 
-function buildMainSets(
-  sessionType: SessionType,
-  zone: TrainingZoneId,
-  poolLength: PoolLength,
-  sessionMeters: number,
-  form: PlanFormState,
-): string[] {
-  const step = getPoolStep(poolLength)
-  const repeatDistance = roundToPool(sessionMeters * 0.22, poolLength)
-  const longDistance = roundToPool(sessionMeters * 0.36, poolLength)
-  const shortDistance = roundToPool(Math.max(step, sessionMeters * 0.12), poolLength)
-  const useTempoTrainer = form.availableEquipment.includes('Tempo Trainer')
-  const useSnorkel = form.availableEquipment.includes('呼吸管')
-  const useFins = form.availableEquipment.includes('脚蹼')
-  const usePaddles = form.availableEquipment.includes('划手掌') && form.injury !== '肩部'
-
-  const byType: Record<SessionType, string[]> = {
-    Technique: [
-      `8×${step} 技术练习：单臂 / 抱水路径 / 身体姿态，每组专注一个技术点`,
-      useSnorkel ? `4×${step} 呼吸管配合节奏游，保持身体线条稳定` : `4×${step} 低强度节奏游，专注换气时机与头位控制`,
-    ],
-    Aerobic: [
-      `${Math.max(4, Math.round(longDistance / step))}×${step} Zone 2 持续游，组间短休保持稳定节奏`,
-      `1×${longDistance} 连续游，后半程保持技术完整与呼吸控制`,
-    ],
-    Threshold: [
-      `${Math.max(5, Math.round(repeatDistance / step))}×${step} Zone 3 阈值组，组间控制短休`,
-      `4×${shortDistance} 负分段完成，后半程维持动作质量`,
-    ],
-    VO2: [
-      `6×${step} Zone 4 高质量输出，组间充分恢复`,
-      `4×${shortDistance} 高速完成，目标是维持高强度动作质量`,
-    ],
-    RacePace: [
-      `8×${shortDistance} Zone 5 比赛配速，严格按目标节奏出发`,
-      useTempoTrainer ? `Tempo Trainer 控节奏完成 4×${step} Race Pace 练习` : `4×${step} 比赛配速分段，关注出发与转身后节奏`,
-    ],
-    Sprint: [
-      `10×${shortDistance} Zone 6 全力短冲，组间完全恢复`,
-      useFins ? `6×${step} 脚蹼加速，强化高速水感` : `6×${step} 无脚蹼高质量冲刺，重视前 15 米速度`,
-    ],
-    Recovery: [
-      `6×${step} Zone 1 轻松游，拉长动作与呼吸节奏`,
-      `4×${shortDistance} 技术放松游，控制动作松弛`,
-    ],
-    Mixed: [
-      `4×${step} Zone 2 + 4×${step} Zone 3 组合，逐步提速`,
-      usePaddles ? `4×${shortDistance} 小体量划手掌组，高质量完成` : `4×${shortDistance} 徒手节奏组，避免过度拉力刺激`,
-    ],
-  }
-
-  return byType[sessionType]
-}
-
 function buildWeeklyPlan(
   form: PlanFormState,
   eventGroup: EventGroup,
@@ -212,34 +687,54 @@ function buildWeeklyPlan(
     const warmMeters = roundToPool(sessionMeters * 0.25, form.poolLength)
     const skillMeters = roundToPool(sessionMeters * 0.18, form.poolLength)
     const coolDownMeters = roundToPool(Math.max(getPoolStep(form.poolLength), sessionMeters * 0.12), form.poolLength)
+    // 获取适合的Drill（用于技术块）
+    const drills = getRecommendedDrills({
+      level: form.level,
+      eventGroup,
+      goalType: form.goalType,
+      injury: form.injury,
+      limit: 3,
+    })
+    const warmupSets = buildWarmupSets(form, form.poolLength, warmMeters, drills)
+    const techniqueSets = buildTechniqueSets(form, form.poolLength, skillMeters, drills)
+    const mainSets = buildMainSets(sessionType, blueprint.zone, form.poolLength, sessionMeters - warmMeters - skillMeters - coolDownMeters, form, eventGroup)
+    const coolDownSets = buildCoolDownSets(form, form.poolLength, coolDownMeters, drills)
+    const blocks = [
+      {
+        label: '热身',
+        zone: 2 as TrainingZoneId,
+        sets: warmupSets,
+      },
+      {
+        label: '技术',
+        zone: 1 as TrainingZoneId,
+        sets: techniqueSets,
+      },
+      {
+        label: '主集',
+        zone: blueprint.zone,
+        sets: mainSets,
+        note: `本节主集重心：${blueprint.focus}`,
+      },
+      {
+        label: '放松',
+        zone: 1 as TrainingZoneId,
+        sets: coolDownSets,
+      },
+    ]
+    const actualSessionMeters = blocks.reduce((sum, block) => sum + getBlockTotalMeters(block.sets), 0)
+    const actualSessionDurationSeconds = blocks.reduce(
+      (sum, block) => sum + block.sets.reduce((setSum, set) => setSum + set.estimatedDurationSeconds, 0),
+      0,
+    )
 
     return {
       dayIndex: index + 1,
       title: `Day ${index + 1}｜${blueprint.label}`,
       focus: blueprint.focus,
-      totalMeters: sessionMeters,
-      blocks: [
-        {
-          label: '热身',
-          zone: 2,
-          sets: [`热身 ${warmMeters}m：轻松游 + 打腿 + 配速递增`, `4×${getPoolStep(form.poolLength)} 技术准备，唤醒节奏感`],
-        },
-        {
-          label: '技术',
-          zone: 1,
-          sets: [`技术 ${skillMeters}m：单臂 / 低阻力滑行 / 身体姿态`, `动作要求：以“轻、长、稳”为优先`],
-        },
-        {
-          label: '主集',
-          zone: blueprint.zone,
-          sets: buildMainSets(sessionType, blueprint.zone, form.poolLength, sessionMeters, form),
-        },
-        {
-          label: '放松',
-          zone: 1,
-          sets: [`放松 ${coolDownMeters}m：轻松游 + 节奏恢复`, '训练后 5–10 分钟拉伸肩背、髋与踝'],
-        },
-      ],
+      totalMeters: actualSessionMeters,
+      estimatedDurationMinutes: Math.max(1, Math.round(actualSessionDurationSeconds / 60)),
+      blocks,
     }
   })
 }
@@ -247,7 +742,7 @@ function buildWeeklyPlan(
 function deriveTechnicalFocus(form: PlanFormState, eventGroup: EventGroup, baseFocus: string[]): string[] {
   const focus = [...baseFocus]
   if (form.injury === '肩部') focus.unshift('肩部限制下优先降低拉力负荷，关注肩胛控制与划水路径')
-  if (form.goalType === '技术优化') focus.unshift('本周期以“动作效率优先于速度结果”为首要原则')
+  if (form.goalType === '技术优化') focus.unshift('本周期以"动作效率优先于速度结果"为首要原则')
   return focus.slice(0, 5)
 }
 
@@ -393,4 +888,3 @@ export function generateRuleBasedTrainingPlan(
     },
   }
 }
-

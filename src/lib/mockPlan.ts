@@ -1,4 +1,4 @@
-import type { PlanFormState, TrainingPlanResult } from './types'
+import type { PlanFormState, TrainingPlanResult, TrainingSet } from './types'
 import { generateRuleBasedTrainingPlan } from './ruleBasedTrainingGenerator'
 import { parseTimeInput } from './time'
 
@@ -23,7 +23,10 @@ export function toPlainText(form: PlanFormState, result: TrainingPlanResult): st
   ]
 
   const zonesText = result.trainingZones
-    .map((z) => `Zone ${z.zoneId}｜${z.nameZh}：${z.purpose}（${z.intensityHint}）`)
+    .map(
+      (z) =>
+        `Zone ${z.zoneId}｜${z.nameZh}：${z.purpose}（${z.intensityHint}）｜心率 ${z.hrHint}｜休息 ${z.restSuggestion}｜配速 ${z.paceSuggestion}｜预计 ${z.estimatedDurationHint}`,
+    )
     .join('\n')
 
   const planText = result.weeklyTrainingPlan
@@ -31,10 +34,17 @@ export function toPlainText(form: PlanFormState, result: TrainingPlanResult): st
       const blocks = s.blocks
         .map((b) => {
           const prefix = b.zone ? `Zone ${b.zone}｜` : ''
-          return [`- ${b.label} ${prefix}`.trim(), ...b.sets.map((x) => `  - ${x}`)].join('\n')
+          const blockLines = b.sets.map((x) => {
+            const set = x as TrainingSet
+            const base = `  - ${set.repetitions}×${set.distanceMeters}m ${set.stroke}｜Drill：${set.drillName}｜Zone ${set.zone}｜心率 ${set.heartRateRange}｜出发间隔 ${set.sendOffIntervalSeconds}秒｜间歇 ${set.restSeconds}秒｜配速 ${set.paceTarget}｜预计训练时长 ${Math.round(set.estimatedDurationSeconds / 60)} 分钟`
+            const cue = set.techniqueCues.length > 0 ? `（${set.techniqueCues[0]}）` : ''
+            const note = set.note ? `｜说明：${set.note}` : ''
+            return `${base}${note}${cue}`
+          })
+          return [`- ${b.label} ${prefix}`.trim(), ...blockLines].join('\n')
         })
         .join('\n')
-      return [`${s.title}（${s.totalMeters}m）`, `重点：${s.focus}`, blocks].join('\n')
+      return [`${s.title}（${s.totalMeters}m）`, `重点：${s.focus}`, `预计训练时长：${s.estimatedDurationMinutes} 分钟`, blocks].join('\n')
     })
     .join('\n\n')
 
@@ -69,4 +79,3 @@ export function toPlainText(form: PlanFormState, result: TrainingPlanResult): st
     ...result.meta.notes.map((x) => `- note: ${x}`),
   ].join('\n')
 }
-

@@ -13,7 +13,7 @@ function maxDifficultyForLevel(level: SwimmingLevel): 1 | 2 | 3 | 4 | 5 {
   if (level === 'L1') return 2
   if (level === 'L2') return 3
   if (level === 'L3') return 4
-  return 5
+  return 5 // L4 / L5
 }
 
 function safeLimit(limit: number | undefined) {
@@ -28,9 +28,12 @@ function applyFilterWithFallback<T>(source: T[], filterFn: (item: T) => boolean)
 }
 
 function scoreDrill(drill: Drill, params: RecommendDrillParams) {
-  const levelMatch = drill.suitableLevels.includes(params.level) ? 1 : 0
-  const goalMatch = drill.goalTypes.includes(params.goalType) ? 1 : 0
-  const eventMatch = drill.eventGroups.includes(params.eventGroup) ? 1 : 0
+  const allLevels = drill.suitableLevels as readonly SwimmingLevel[]
+  const allGoals = drill.goalTypes as readonly GoalType[]
+  const allEvents = drill.eventGroups as readonly EventGroup[]
+  const levelMatch = allLevels.includes(params.level) ? 1 : 0
+  const goalMatch = allGoals.includes(params.goalType) ? 1 : 0
+  const eventMatch = allEvents.includes(params.eventGroup) ? 1 : 0
   const injuryPenalty = 0
 
   return levelMatch * 5 + goalMatch * 4 + eventMatch * 3 - injuryPenalty
@@ -42,12 +45,16 @@ export function getRecommendedDrills(params: RecommendDrillParams): Drill[] {
 
   const maxDifficulty = maxDifficultyForLevel(params.level)
 
+  const allLevels = params.level as SwimmingLevel
+  const allGoals = params.goalType as GoalType
+  const allEvents = params.eventGroup as EventGroup
+
   let candidates = DRILL_REGISTRY.slice()
 
-  candidates = candidates.filter((d) => d.suitableLevels.includes(params.level))
-  candidates = applyFilterWithFallback(candidates, (d) => d.eventGroups.includes(params.eventGroup))
-  candidates = applyFilterWithFallback(candidates, (d) => d.goalTypes.includes(params.goalType))
-  candidates = candidates.filter((d) => !d.avoidForInjuries?.includes(params.injury))
+  candidates = candidates.filter((d) => (d.suitableLevels as readonly SwimmingLevel[]).includes(allLevels))
+  candidates = applyFilterWithFallback(candidates, (d) => (d.eventGroups as readonly EventGroup[]).includes(allEvents))
+  candidates = applyFilterWithFallback(candidates, (d) => (d.goalTypes as readonly GoalType[]).includes(allGoals))
+  candidates = candidates.filter((d) => !(d.avoidForInjuries as readonly Injury[] | undefined)?.includes(params.injury))
   candidates = candidates.filter((d) => d.difficulty <= maxDifficulty)
 
   return candidates
@@ -61,4 +68,3 @@ export function getRecommendedDrills(params: RecommendDrillParams): Drill[] {
     })
     .slice(0, limit)
 }
-

@@ -48,10 +48,43 @@ describe('generateRuleBasedTrainingPlan', () => {
     expect(result.trainingSummary.length).toBeGreaterThan(0)
     expect(result.recommendedWeeklyVolumeMeters).toBeGreaterThan(0)
     expect(result.trainingZones).toHaveLength(6)
+    expect(result.trainingZones[0].restSuggestion.length).toBeGreaterThan(0)
+    expect(result.trainingZones[0].paceSuggestion.length).toBeGreaterThan(0)
+    expect(result.trainingZones[0].estimatedDurationHint.length).toBeGreaterThan(0)
     expect(result.weeklyTrainingPlan).toHaveLength(4)
+    const firstSet = result.weeklyTrainingPlan[0].blocks[0].sets[0] as any
+    expect(firstSet.distanceMeters).toBeGreaterThan(0)
+    expect(firstSet.repetitions).toBeGreaterThan(0)
+    expect(firstSet.stroke.length).toBeGreaterThan(0)
+    expect(firstSet.drillName.length).toBeGreaterThan(0)
+    expect(firstSet.restSeconds).toBeGreaterThanOrEqual(0)
+    expect(firstSet.sendOffIntervalSeconds).toBeGreaterThan(0)
+    expect(firstSet.estimatedDurationSeconds).toBeGreaterThan(0)
+    expect(firstSet.paceTarget.length).toBeGreaterThan(0)
+    expect(firstSet.heartRateRange.length).toBeGreaterThan(0)
+    expect(firstSet.zone).toBeGreaterThanOrEqual(1)
+    expect(result.weeklyTrainingPlan[0].estimatedDurationMinutes).toBeGreaterThan(0)
     expect(result.technicalFocus.length).toBeGreaterThan(0)
     expect(result.recoveryAdvice.length).toBeGreaterThan(0)
     expect(result.whyThisPlan.length).toBeGreaterThan(0)
+  })
+
+  it('所有训练块都拆解为可执行明细，不输出概括性字符串', () => {
+    const result = generateRuleBasedTrainingPlan(baseForm, { now })
+
+    result.weeklyTrainingPlan.forEach((session) => {
+      session.blocks.forEach((block) => {
+        expect(block.sets.length).toBeGreaterThan(0)
+        block.sets.forEach((set: any) => {
+          expect(typeof set).toBe('object')
+          expect(set.repetitions).toBeGreaterThan(0)
+          expect(set.distanceMeters).toBeGreaterThan(0)
+          expect(set.drillName).not.toMatch(/^热身|^主集|^放松$/)
+          expect(set.paceTarget).not.toBe('')
+          expect(set.heartRateRange).toContain('bpm')
+        })
+      })
+    })
   })
 
   it('能根据伤病和器材约束修正输出', () => {
@@ -65,12 +98,16 @@ describe('generateRuleBasedTrainingPlan', () => {
     )
 
     const mainSets = result.weeklyTrainingPlan.flatMap((session) =>
-      session.blocks.flatMap((block) => block.label === '主集' ? block.sets : []),
+      session.blocks.filter((block) => block.label === '主集').flatMap((block) => block.sets),
     )
 
     expect(result.meta.notes).toContain('已根据肩部限制降低高风险训练内容。')
     expect(result.recoveryAdvice.some((line) => line.includes('肩部不适'))).toBe(true)
-    expect(mainSets.some((line) => line.includes('划手掌'))).toBe(false)
+    // 主集 TrainingSet 不应含划手掌 drillId
+    const hasPaddleDrill = (mainSets as unknown[])
+      .filter((s): s is Record<string, unknown> => typeof s === 'object' && s !== null && 'drillIds' in s)
+      .some((s) => (s.drillIds as string[]).some((id) => id.includes('paddle')))
+    expect(hasPaddleDrill).toBe(false)
   })
 
   it('目标日期无效时回退到 Build 并写入 meta notes', () => {
@@ -101,4 +138,3 @@ describe('generateRuleBasedTrainingPlan', () => {
     expect(result.meta.notes).toContain('目标差距较大，建议优先保证关键主课质量，而非盲目加量。')
   })
 })
-
