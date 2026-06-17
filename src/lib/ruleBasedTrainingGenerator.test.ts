@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { generateRuleBasedTrainingPlan } from './ruleBasedTrainingGenerator'
-import type { PlanFormState } from './types'
+import type { PlanFormState, TrainingSet } from './types'
 
 const baseForm: PlanFormState = {
   age: 16,
@@ -52,7 +52,7 @@ describe('generateRuleBasedTrainingPlan', () => {
     expect(result.trainingZones[0].paceSuggestion.length).toBeGreaterThan(0)
     expect(result.trainingZones[0].estimatedDurationHint.length).toBeGreaterThan(0)
     expect(result.weeklyTrainingPlan).toHaveLength(4)
-    const firstSet = result.weeklyTrainingPlan[0].blocks[0].sets[0] as any
+    const firstSet: TrainingSet = result.weeklyTrainingPlan[0].blocks[0].sets[0]
     expect(firstSet.distanceMeters).toBeGreaterThan(0)
     expect(firstSet.repetitions).toBeGreaterThan(0)
     expect(firstSet.stroke.length).toBeGreaterThan(0)
@@ -75,7 +75,7 @@ describe('generateRuleBasedTrainingPlan', () => {
     result.weeklyTrainingPlan.forEach((session) => {
       session.blocks.forEach((block) => {
         expect(block.sets.length).toBeGreaterThan(0)
-        block.sets.forEach((set: any) => {
+        block.sets.forEach((set: TrainingSet) => {
           expect(typeof set).toBe('object')
           expect(set.repetitions).toBeGreaterThan(0)
           expect(set.distanceMeters).toBeGreaterThan(0)
