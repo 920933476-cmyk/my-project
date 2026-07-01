@@ -34,17 +34,15 @@ describe('generateRuleBasedTrainingPlan', () => {
     const result = generateRuleBasedTrainingPlan(baseForm, { now })
 
     expect(result.templateId).toBe('L2_Sprint_成绩提升_Build_Medium_v1')
-    expect(result.meta).toEqual({
-      mode: 'rule_based',
-      derived: {
-        eventGroup: 'Sprint',
-        phase: 'Build',
-        weeksToTarget: 8,
-        improvementRatio: 0.04,
-        intensityTier: 'Medium',
-      },
-      notes: [],
+    expect(result.meta.mode).toBe('rule_based')
+    expect(result.meta.derived).toEqual({
+      eventGroup: 'Sprint',
+      phase: 'Build',
+      weeksToTarget: 8,
+      improvementRatio: 0.04,
+      intensityTier: 'Medium',
     })
+    expect(result.meta.notes).toContain('KBV2：已启用知识库校验与建议。')
     expect(result.trainingSummary.length).toBeGreaterThan(0)
     expect(result.recommendedWeeklyVolumeMeters).toBeGreaterThan(0)
     expect(result.trainingZones).toHaveLength(6)
@@ -52,6 +50,9 @@ describe('generateRuleBasedTrainingPlan', () => {
     expect(result.trainingZones[0].paceSuggestion.length).toBeGreaterThan(0)
     expect(result.trainingZones[0].estimatedDurationHint.length).toBeGreaterThan(0)
     expect(result.weeklyTrainingPlan).toHaveLength(4)
+    expect(Array.isArray(result.recommendedDrills)).toBe(true)
+    expect(result.recommendedDrills.length).toBeGreaterThan(0)
+    expect(result.recommendedDrills[0].nameZh.length).toBeGreaterThan(0)
     const firstSet: TrainingSet = result.weeklyTrainingPlan[0].blocks[0].sets[0]
     expect(firstSet.distanceMeters).toBeGreaterThan(0)
     expect(firstSet.repetitions).toBeGreaterThan(0)

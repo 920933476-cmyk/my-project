@@ -58,6 +58,19 @@ export function toPlainText(form: PlanFormState, result: TrainingPlanResult): st
     '训练分区（Zone 1–6）',
     zonesText,
     '',
+    '推荐技术练习（KB V2）',
+    result.recommendedDrills.length === 0
+      ? '- 暂无推荐'
+      : result.recommendedDrills
+          .map((d) => {
+            const purpose = d.purpose.slice(0, 3).join(' / ')
+            const keyPoint = d.keyPoints[0] ?? ''
+            const sets = d.recommendedSets ? `｜推荐：${d.recommendedSets}` : ''
+            const note = keyPoint ? `｜要点：${keyPoint}` : ''
+            return `- ${d.nameZh}${purpose ? `（${purpose}）` : ''}${sets}${note}`
+          })
+          .join('\n'),
+    '',
     '周训练计划',
     planText,
     '',

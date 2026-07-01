@@ -16,6 +16,7 @@ import type {
 } from './types'
 import { ZONE_FRAMEWORK, estimateIntervalSeconds, estimateRestSeconds } from './zoneFramework'
 import { getRecommendedDrills } from './drills/query'
+import { knowledgeBridge } from './knowledge/knowledgeBridge'
 
 type GeneratorOptions = {
   now: Date
@@ -23,6 +24,130 @@ type GeneratorOptions = {
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n))
+}
+
+function toKnowledgeLevel(level: PlanFormState['level']) {
+  if (level === 'L1' || level === 'L2' || level === 'L3' || level === 'L4') return level
+  return null
+}
+
+function toKnowledgePhase(phase: TrainingPlanResult['meta']['derived']['phase']) {
+  if (phase === 'Base') return 'base'
+  if (phase === 'Build') return 'build'
+  if (phase === 'Specific') return 'peak'
+  if (phase === 'Taper') return 'taper'
+  return null
+}
+
+function toKnowledgeZone(zone: TrainingZoneId) {
+  if (zone === 1) return 'Z1'
+  if (zone === 2) return 'Z2'
+  if (zone === 3) return 'Z3'
+  if (zone === 4) return 'Z4'
+  return 'Z5'
+}
+
+function toKnowledgeStrokeType(event: PlanFormState['event']) {
+  if (event.includes('Free') || event.includes('自由')) return 'freestyle'
+  if (event.includes('Back')) return 'backstroke'
+  if (event.includes('Breast')) return 'breaststroke'
+  if (event.includes('Fly')) return 'butterfly'
+  return 'medley'
+}
+
+function injuryToContraindication(injury: PlanFormState['injury']) {
+  if (injury === '肩部') return '肩伤'
+  if (injury === '腰部') return '腰伤'
+  if (injury === '膝关节') return '膝盖伤'
+  if (injury === '踝关节') return '踝关节伤'
+  return null
+}
+
+function getDesiredDrillPurposes(goalType: GoalType) {
+  if (goalType === '技术优化') return ['水感培养', '身体位置', '呼吸技术', '抓水/划水']
+  if (goalType === '耐力发展') return ['节奏训练', '抓水/划水', '身体位置']
+  if (goalType === '速度提升') return ['节奏训练', '打腿技术', '出发技术', '转身技术']
+  if (goalType === '比赛备战') return ['节奏训练', '转身技术', '出发技术']
+  if (goalType === '铁人三项专项') return ['节奏训练', '呼吸技术', '身体位置']
+  return ['抓水/划水', '节奏训练', '身体位置']
+}
+
+function buildRecommendedDrills(form: PlanFormState): TrainingPlanResult['recommendedDrills'] {
+  const kbLevel = toKnowledgeLevel(form.level)
+  if (!kbLevel) return []
+  const contraindication = injuryToContraindication(form.injury)
+  const strokeType = toKnowledgeStrokeType(form.event)
+  const candidates = knowledgeBridge
+    .getDrillsByLevel(kbLevel)
+    .filter((d) => d.strokes.includes('all') || d.strokes.includes(strokeType))
+    .filter((d) => (contraindication ? !d.contraindications?.includes(contraindication) : true))
+
+  const desiredPurposes = getDesiredDrillPurposes(form.goalType)
+
+  const scored = candidates.map((d) => {
+    const purposeScore = desiredPurposes.reduce((sum, p) => (d.purpose.includes(p as never) ? sum + 10 : sum), 0)
+    const tagScore = d.tags.reduce((sum, tag) => (desiredPurposes.some((p) => tag.includes(p)) ? sum + 2 : sum), 0)
+    return { d, score: purposeScore + tagScore }
+  })
+
+  scored.sort((a, b) => (b.score !== a.score ? b.score - a.score : a.d.id.localeCompare(b.d.id)))
+
+  return scored.slice(0, 3).map(({ d }) => ({
+    id: d.id,
+    name: d.name,
+    nameZh: d.nameZh,
+    category: d.category,
+    strokes: d.strokes,
+    level: d.level,
+    purpose: d.purpose,
+    steps: d.steps,
+    keyPoints: d.keyPoints,
+    recommendedSets: d.recommendedSets,
+    recommendedZones: d.recommendedZones,
+    contraindications: d.contraindications,
+    source: d.source,
+    tags: d.tags,
+  }))
+}
+
+function formatDurationSeconds(seconds: number) {
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  return `${minutes}:${String(remainder).padStart(2, '0')}`
+}
+
+function pickKnowledgeIntervalNote(zone: TrainingZoneId, restSeconds: number) {
+  const kbZone = toKnowledgeZone(zone)
+  const duration = formatDurationSeconds(restSeconds)
+  const exact = knowledgeBridge.getInterval(kbZone, duration)
+  const fallback = knowledgeBridge.getIntervalsByZone(kbZone)[0]
+  const selected = exact ?? fallback
+  if (!selected) return null
+  return `间歇参考：${selected.nameZh}`
+}
+
+function findModifierNote(form: PlanFormState, type: 'injury' | 'goal' | 'athlete_type') {
+  const pool = knowledgeBridge.getModifiers(type)
+  const keyword =
+    type === 'injury'
+      ? form.injury === '无'
+        ? null
+        : form.injury
+      : type === 'goal'
+        ? form.goalType
+        : form.goalType === '铁人三项专项'
+          ? '铁人三项'
+          : null
+  if (!keyword) return null
+  const hit = pool.find(
+    (entry) =>
+      entry.nameZh.includes(keyword) ||
+      entry.description.includes(keyword) ||
+      entry.impact.note.includes(keyword),
+  )
+  if (!hit) return null
+  return `KBV2 修正器：${hit.nameZh}｜${hit.impact.note}`
 }
 
 function getIntensityTier(improvementRatio: number | null): IntensityTier {
@@ -225,6 +350,9 @@ function makeSet(params: {
   const restSeconds = estimateRestSeconds(zone)
   const sendOffIntervalSeconds = swimSeconds + restSeconds
   const estimatedDurationSeconds = repetitions * (swimSeconds + restSeconds)
+  const kbIntervalNote = pickKnowledgeIntervalNote(zone, restSeconds)
+  const mergedNote =
+    kbIntervalNote && note ? `${note}｜${kbIntervalNote}` : kbIntervalNote ? kbIntervalNote : note
 
   return {
     distanceMeters,
@@ -240,7 +368,7 @@ function makeSet(params: {
     rpe,
     drillIds: drills.slice(0, 2).map((d) => d.id),
     techniqueCues,
-    note,
+    note: mergedNote,
   }
 }
 
@@ -802,7 +930,9 @@ export function generateRuleBasedTrainingPlan(
   options: GeneratorOptions,
 ): TrainingPlanResult {
   const notes: string[] = []
+  notes.push('KBV2：已启用知识库校验与建议。')
   const eventGroup = classifyEventGroup(form.event)
+  const recommendedDrills = buildRecommendedDrills(form)
   const phaseResult = calculateTrainingPhase(form.targetDate, options.now)
   const phase = phaseResult?.phase ?? 'Build'
   const weeksToTarget = phaseResult?.weeksToTarget ?? null
@@ -824,8 +954,30 @@ export function generateRuleBasedTrainingPlan(
     intensityTier,
   })
 
-  const volume = calculateRecommendedWeeklyVolume(form, eventGroup, phase, intensityTier, template.defaults.recommendedWeeklyVolumeMultiplier)
+  const volume = calculateRecommendedWeeklyVolume(
+    form,
+    eventGroup,
+    phase,
+    intensityTier,
+    template.defaults.recommendedWeeklyVolumeMultiplier,
+  )
   notes.push(...volume.notes)
+  let recommendedWeeklyVolumeMeters = volume.recommendedWeeklyVolumeMeters
+  const kbLevel = toKnowledgeLevel(form.level)
+  const kbPhase = toKnowledgePhase(phase)
+  if (kbLevel && kbPhase) {
+    const kbVolume = knowledgeBridge.getVolume(kbLevel, kbPhase)
+    if (kbVolume) {
+      const { min, max } = kbVolume.weeklyVolumeRange
+      if (recommendedWeeklyVolumeMeters < min) {
+        recommendedWeeklyVolumeMeters = min
+        notes.push(`KBV2 周量已按区间下限上调至 ${min}m（${kbPhase}/${kbLevel}）。`)
+      } else if (recommendedWeeklyVolumeMeters > max) {
+        recommendedWeeklyVolumeMeters = max
+        notes.push(`KBV2 周量已按区间上限下调至 ${max}m（${kbPhase}/${kbLevel}）。`)
+      }
+    }
+  }
 
   if (form.goalType === '铁人三项专项') {
     notes.push('铁三专项已采用稳定有氧优先的模板结构。')
@@ -839,17 +991,24 @@ export function generateRuleBasedTrainingPlan(
     notes.push(`已根据${form.injury}限制降低高风险训练内容。`)
   }
 
+  const kbInjuryModifier = findModifierNote(form, 'injury')
+  if (kbInjuryModifier) notes.push(kbInjuryModifier)
+  const kbGoalModifier = findModifierNote(form, 'goal')
+  if (kbGoalModifier) notes.push(kbGoalModifier)
+  const kbAthleteModifier = findModifierNote(form, 'athlete_type')
+  if (kbAthleteModifier) notes.push(kbAthleteModifier)
+
   const weeklyTrainingPlan = buildWeeklyPlan(
     form,
     eventGroup,
     form.goalType,
     template.weeklyStructure.pattern,
-    volume.recommendedWeeklyVolumeMeters,
+    recommendedWeeklyVolumeMeters,
   )
 
   const delta =
     typeof form.weeklyDistanceMeters === 'number' && form.weeklyDistanceMeters > 0
-      ? volume.recommendedWeeklyVolumeMeters - form.weeklyDistanceMeters
+      ? recommendedWeeklyVolumeMeters - form.weeklyDistanceMeters
       : null
 
   const trainingSummary = [
@@ -860,17 +1019,18 @@ export function generateRuleBasedTrainingPlan(
       : '成绩输入不足，当前以项目组、等级和目标类型驱动训练结构。',
     `本周训练重点：${template.summaryFocus}`,
     delta === null
-      ? `推荐周量：${volume.recommendedWeeklyVolumeMeters}m`
-      : `推荐周量：${volume.recommendedWeeklyVolumeMeters}m（较当前${delta >= 0 ? ` +${delta}` : ` ${delta}`}m）`,
+      ? `推荐周量：${recommendedWeeklyVolumeMeters}m`
+      : `推荐周量：${recommendedWeeklyVolumeMeters}m（较当前${delta >= 0 ? ` +${delta}` : ` ${delta}`}m）`,
     `训练频次：${form.trainingDaysPerWeek || '—'} 天/周，单次 ${form.trainingDurationPerSessionMinutes || '—'} 分钟`,
   ]
 
   return {
     templateId: template.templateId,
     trainingSummary,
-    recommendedWeeklyVolumeMeters: volume.recommendedWeeklyVolumeMeters,
+    recommendedWeeklyVolumeMeters,
     trainingZones: ZONE_FRAMEWORK,
     weeklyTrainingPlan,
+    recommendedDrills,
     technicalFocus: deriveTechnicalFocus(form, eventGroup, template.technicalFocus),
     drylandTrainingAdvice: deriveDrylandAdvice(form),
     recoveryAdvice: deriveRecoveryAdvice(form, template.recoveryAdvice),

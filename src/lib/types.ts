@@ -126,12 +126,30 @@ export type WeeklySession = {
   blocks: TrainingBlock[]
 }
 
+export type RecommendedDrill = {
+  id: string
+  name: string
+  nameZh: string
+  category: string
+  strokes: string[]
+  level: Exclude<SwimmingLevel, 'L5'>
+  purpose: string[]
+  steps: string[]
+  keyPoints: string[]
+  recommendedSets?: string
+  recommendedZones?: string[]
+  contraindications?: string[]
+  source: string
+  tags: string[]
+}
+
 export type TrainingPlanResult = {
   templateId: string
   trainingSummary: string[]
   recommendedWeeklyVolumeMeters: number
   trainingZones: TrainingZone[]
   weeklyTrainingPlan: WeeklySession[]
+  recommendedDrills: RecommendedDrill[]
   technicalFocus: string[]
   drylandTrainingAdvice: string[]
   recoveryAdvice: string[]

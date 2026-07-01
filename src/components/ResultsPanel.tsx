@@ -233,6 +233,43 @@ export function ResultsPanel({
           </ul>
         </ResultBlock>
 
+        <ResultBlock title="推荐技术练习（KB V2）" icon={<Sparkles className="h-4 w-4 text-neon-mint/80" />}>
+          {result.recommendedDrills.length === 0 ? (
+            <div className="text-sm text-white/60">暂无推荐</div>
+          ) : (
+            <div className="space-y-3">
+              {result.recommendedDrills.map((d) => (
+                <div key={d.id} className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-display text-sm text-white/92">{d.nameZh}</div>
+                    <div className="text-[11px] text-white/45">{d.name}</div>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-white/55">
+                    <span className="rounded-full border border-white/10 bg-abyss-900/25 px-2 py-0.5">{d.level}</span>
+                    <span className="rounded-full border border-white/10 bg-abyss-900/25 px-2 py-0.5">{d.category}</span>
+                    {d.purpose.slice(0, 3).map((p) => (
+                      <span key={p} className="rounded-full border border-white/10 bg-abyss-900/25 px-2 py-0.5">
+                        {p}
+                      </span>
+                    ))}
+                  </div>
+                  {d.recommendedSets ? <div className="mt-2 text-xs text-white/65">推荐组合：{d.recommendedSets}</div> : null}
+                  {d.keyPoints.length > 0 ? (
+                    <ul className="mt-2 space-y-1 text-xs text-white/65">
+                      {d.keyPoints.slice(0, 3).map((k) => (
+                        <li key={k} className="flex items-start gap-2">
+                          <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-white/35" />
+                          <span>{k}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </ResultBlock>
+
         <ResultBlock title="陆上力量训练" icon={<Dumbbell className="h-4 w-4 text-neon-mint/80" />}>
           <ul className="space-y-2 text-sm text-white/78">
             {result.drylandTrainingAdvice.map((x) => (
